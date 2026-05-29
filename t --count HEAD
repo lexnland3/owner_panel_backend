@@ -1,0 +1,41 @@
+[33mcommit 04aec003dc22407a453c4345c0107129222eb723[m
+Author: Anmol <sixteen0183@gmail.com>
+Date:   Fri May 29 17:26:36 2026 +0530
+
+    first commit
+
+ .gitignore                            |    3 [32m+[m
+ README.md                             |  219 [32m++[m
+ config/cloudinary.js                  |  172 [32m++[m
+ config/db.js                          |   20 [32m+[m
+ config/email.js                       |   17 [32m+[m
+ config/firebase.js                    |   23 [32m+[m
+ controllers/authController.js         |  331 [32m+++[m
+ controllers/notificationController.js |   85 [32m+[m
+ controllers/propertyController.js     |  306 [32m+++[m
+ controllers/visitController.js        |  121 [32m++[m
+ middleware/auth.js                    |   19 [32m+[m
+ middleware/errorHandler.js            |   21 [32m+[m
+ models/Chat.js                        |   16 [32m+[m
+ models/Favourite.js                   |    9 [32m+[m
+ models/Message.js                     |   35 [32m+[m
+ models/Notification.js                |   15 [32m+[m
+ models/Owner.js                       |   55 [32m+[m
+ models/Property.js                    |   87 [32m+[m
+ models/Visit.js                       |   26 [32m+[m
+ package-lock.json                     | 3851 [32m+++++++++++++++++++++++++++++++++[m
+ package.json                          |   28 [32m+[m
+ routes/admin.js                       |  411 [32m++++[m
+ routes/admin.js.bak                   |  341 [32m+++[m
+ routes/auth.js                        |   26 [32m+[m
+ routes/customers.js                   |  651 [32m++++++[m
+ routes/messages.js                    |   10 [32m+[m
+ routes/notifications.js               |   33 [32m+[m
+ routes/properties.js                  |   45 [32m+[m
+ routes/test.js                        |   91 [32m+[m
+ routes/visits.js                      |  332 [32m+++[m
+ server.js                             |  127 [32m++[m
+ serviceAccountKey.json                |   13 [32m+[m
+ utils/phoneDetector.js                |  116 [32m+[m
+ utils/token.js                        |   22 [32m+[m
+ 34 files changed, 7677 insertions(+)

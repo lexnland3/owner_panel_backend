@@ -1,0 +1,331 @@
+const Owner        = require('../models/Owner');
+const Notification = require('../models/Notification');
+const { sendTokenResponse } = require('../utils/token');
+const { sendOTPEmail }      = require('../config/email');
+const { verifyFirebaseToken } = require('../config/firebase');
+
+// ── Welcome notification ────────────────────────────────────
+const createWelcomeNotif = async (ownerId, name) => {
+  try {
+    await Notification.create({
+      owner:   ownerId,
+      title:   'Welcome to LexNLand! 🏠',
+      message: `Hi ${name}! Complete your profile and upload your first property.`,
+      type:    'system',
+    });
+  } catch (_) {}
+};
+
+// ────────────────────────────────────────────────────────────
+// POST /api/auth/google  ← Firebase ID token from Flutter
+// ────────────────────────────────────────────────────────────
+exports.googleAuth = async (req, res, next) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken)
+      return res.status(400).json({ success: false, message: 'Firebase ID token is required' });
+
+    // Verify token with Firebase Admin SDK
+    const result = await verifyFirebaseToken(idToken);
+    if (!result.valid)
+      return res.status(401).json({ success: false, message: `Invalid Firebase token: ${result.error}` });
+
+    const { uid, email, name, picture } = result.decoded;
+
+    if (!email)
+      return res.status(400).json({ success: false, message: 'Could not get email from Google account' });
+
+    // Find existing or create new owner
+    let owner = await Owner.findOne({ $or: [{ googleId: uid }, { email }] });
+
+    if (!owner) {
+      // New user — create account
+      owner = await Owner.create({
+        name:            name || email.split('@')[0],
+        email,
+        googleId:        uid,
+        profilePhoto:    picture || null,
+        authMethod:      'google',
+        isEmailVerified: true,
+        accountStatus:   'active',
+      });
+      await createWelcomeNotif(owner._id, owner.name);
+    } else {
+      // Existing user — update Google info if needed
+      let changed = false;
+      if (!owner.googleId)    { owner.googleId = uid; changed = true; }
+      if (!owner.profilePhoto){ owner.profilePhoto = picture; changed = true; }
+      if (!owner.isEmailVerified) { owner.isEmailVerified = true; changed = true; }
+      if (owner.accountStatus === 'pending') { owner.accountStatus = 'active'; changed = true; }
+      if (changed) await owner.save({ validateBeforeSave: false });
+    }
+
+    sendTokenResponse(owner, 200, res);
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
+// POST /api/auth/register
+// ────────────────────────────────────────────────────────────
+exports.register = async (req, res, next) => {
+  try {
+    const { name, email, phone, password } = req.body;
+    if (!name || !email || !password)
+      return res.status(400).json({ success: false, message: 'Name, email and password are required' });
+
+    const existing = await Owner.findOne({ email });
+    if (existing) {
+      if (existing.authMethod === 'google')
+        return res.status(400).json({ success: false, message: 'This email is registered with Google. Please use Google sign-in.' });
+      return res.status(400).json({ success: false, message: 'Email already registered. Please sign in.' });
+    }
+
+    const owner = await Owner.create({ name, email, phone: phone || '', password, authMethod: 'email' });
+
+    // Send OTP
+    const otp = owner.generateOTP('verify');
+    await owner.save({ validateBeforeSave: false });
+
+    let emailSent = false;
+    try {
+      await sendOTPEmail(email, name, otp, 'verify');
+      emailSent = true;
+    } catch (emailErr) {
+      console.error('OTP email failed:', emailErr.message);
+    }
+
+    await createWelcomeNotif(owner._id, name);
+
+    res.status(201).json({
+      success: true,
+      message: emailSent
+        ? 'Account created! Check your email for the verification OTP.'
+        : 'Account created! (Email not configured — use dev OTP below)',
+      requiresVerification: true,
+      email,
+      devOtp: otp, // Always show in dev — remove in production
+    });
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
+// POST /api/auth/verify-email-otp
+// ────────────────────────────────────────────────────────────
+exports.verifyEmailOTP = async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp)
+      return res.status(400).json({ success: false, message: 'Email and OTP are required' });
+
+    const owner = await Owner.findOne({ email }).select('+otp +otpExpiry +otpType');
+    if (!owner)
+      return res.status(404).json({ success: false, message: 'Account not found' });
+
+    const check = owner.verifyOTP(otp, 'verify');
+    if (!check.valid)
+      return res.status(400).json({ success: false, message: check.msg });
+
+    owner.isEmailVerified = true;
+    owner.accountStatus   = 'active';
+    owner.otp       = undefined;
+    owner.otpExpiry = undefined;
+    owner.otpType   = undefined;
+    await owner.save({ validateBeforeSave: false });
+
+    sendTokenResponse(owner, 200, res);
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
+// POST /api/auth/resend-otp
+// ────────────────────────────────────────────────────────────
+exports.resendOTP = async (req, res, next) => {
+  try {
+    const { email, type = 'verify' } = req.body;
+    const owner = await Owner.findOne({ email }).select('+otp +otpExpiry +otpType');
+    if (!owner)
+      return res.status(404).json({ success: false, message: 'Account not found' });
+
+    const otp = owner.generateOTP(type);
+    await owner.save({ validateBeforeSave: false });
+
+    try {
+      await sendOTPEmail(email, owner.name, otp, type);
+    } catch (_) {}
+
+    res.json({ success: true, message: 'OTP resent', devOtp: otp });
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
+// POST /api/auth/login
+// ────────────────────────────────────────────────────────────
+exports.login = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password)
+      return res.status(400).json({ success: false, message: 'Email and password are required' });
+
+    const owner = await Owner.findOne({ email }).select('+password');
+    if (!owner)
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+
+    if (owner.authMethod === 'google')
+      return res.status(400).json({ success: false, message: 'This account uses Google sign-in. Please use the Google button.' });
+
+    if (!(await owner.matchPassword(password)))
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+
+    // Not verified yet — resend OTP
+    if (!owner.isEmailVerified) {
+      const otp = owner.generateOTP('verify');
+      await owner.save({ validateBeforeSave: false });
+      try { await sendOTPEmail(email, owner.name, otp, 'verify'); } catch (_) {}
+      return res.status(200).json({
+        success: true,
+        requiresVerification: true,
+        message: 'Please verify your email. OTP resent.',
+        email,
+        devOtp: otp,
+      });
+    }
+
+    sendTokenResponse(owner, 200, res);
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
+// POST /api/auth/forgot-password
+// ────────────────────────────────────────────────────────────
+exports.forgotPassword = async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email)
+      return res.status(400).json({ success: false, message: 'Email is required' });
+
+    const owner = await Owner.findOne({ email }).select('+otp +otpExpiry +otpType');
+    if (!owner)
+      return res.json({ success: true, message: 'If this email exists, a reset OTP has been sent.' });
+
+    if (owner.authMethod === 'google')
+      return res.status(400).json({ success: false, message: 'This account uses Google sign-in. Password reset is not available.' });
+
+    const otp = owner.generateOTP('reset');
+    await owner.save({ validateBeforeSave: false });
+
+    let emailSent = false;
+    try {
+      await sendOTPEmail(email, owner.name, otp, 'reset');
+      emailSent = true;
+    } catch (emailErr) {
+      console.error('Reset email failed:', emailErr.message);
+    }
+
+    res.json({
+      success: true,
+      message: emailSent ? 'Password reset OTP sent to your email.' : 'OTP generated (email not configured)',
+      devOtp: otp,
+    });
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
+// POST /api/auth/verify-reset-otp
+// ────────────────────────────────────────────────────────────
+exports.verifyResetOTP = async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+    const owner = await Owner.findOne({ email }).select('+otp +otpExpiry +otpType');
+    if (!owner)
+      return res.status(404).json({ success: false, message: 'Account not found' });
+
+    const check = owner.verifyOTP(otp, 'reset');
+    if (!check.valid)
+      return res.status(400).json({ success: false, message: check.msg });
+
+    // Issue a reset token
+    const resetToken = require('crypto').randomBytes(32).toString('hex');
+    owner.otp       = resetToken;
+    owner.otpExpiry = new Date(Date.now() + 15 * 60 * 1000);
+    owner.otpType   = 'reset';
+    await owner.save({ validateBeforeSave: false });
+
+    res.json({ success: true, resetToken, email });
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
+// POST /api/auth/reset-password
+// ────────────────────────────────────────────────────────────
+exports.resetPassword = async (req, res, next) => {
+  try {
+    const { email, resetToken, newPassword } = req.body;
+    if (!email || !resetToken || !newPassword)
+      return res.status(400).json({ success: false, message: 'All fields required' });
+    if (newPassword.length < 6)
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+
+    const owner = await Owner.findOne({ email }).select('+password +otp +otpExpiry');
+    if (!owner)
+      return res.status(404).json({ success: false, message: 'Account not found' });
+    if (owner.otp !== resetToken || new Date() > owner.otpExpiry)
+      return res.status(400).json({ success: false, message: 'Reset token invalid or expired' });
+
+    owner.password  = newPassword;
+    owner.otp       = undefined;
+    owner.otpExpiry = undefined;
+    owner.otpType   = undefined;
+    await owner.save();
+
+    res.json({ success: true, message: 'Password reset successfully! Please sign in.' });
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
+// GET /api/auth/me
+// ────────────────────────────────────────────────────────────
+exports.getMe = async (req, res) => {
+  res.status(200).json({ success: true, owner: req.owner });
+};
+
+// ────────────────────────────────────────────────────────────
+// PUT /api/auth/profile
+// ────────────────────────────────────────────────────────────
+exports.updateProfile = async (req, res, next) => {
+  try {
+    const updates = {};
+    if (req.body.name)  updates.name  = req.body.name;
+    if (req.body.phone) updates.phone = req.body.phone;
+    const owner = await Owner.findByIdAndUpdate(req.owner._id, updates, { new: true, runValidators: true });
+    res.status(200).json({ success: true, owner });
+  } catch (err) { next(err); }
+};
+
+// ────────────────────────────────────────────────────────────
+// PUT /api/auth/change-password
+// ────────────────────────────────────────────────────────────
+exports.changePassword = async (req, res, next) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    const owner = await Owner.findById(req.owner._id).select('+password');
+    if (!(await owner.matchPassword(currentPassword)))
+      return res.status(400).json({ success: false, message: 'Current password is incorrect' });
+    owner.password = newPassword;
+    await owner.save();
+    res.status(200).json({ success: true, message: 'Password updated successfully' });
+  } catch (err) { next(err); }
+};
+
+exports.verifyAadhaar = async (req, res, next) => {
+  try {
+    const owner = await Owner.findByIdAndUpdate(req.owner._id, { isAadhaarVerified: true }, { new: true });
+    res.status(200).json({ success: true, owner });
+  } catch (err) { next(err); }
+};
+
+exports.uploadElectricityBill = async (req, res, next) => {
+  try {
+    const owner = await Owner.findByIdAndUpdate(req.owner._id, { isElectricityUploaded: true }, { new: true });
+    res.status(200).json({ success: true, owner });
+  } catch (err) { next(err); }
+};

@@ -16,7 +16,6 @@ const VisitSchema = new mongoose.Schema({
     enum:    ['pending', 'confirmed', 'cancelled', 'completed', 'rescheduled'],
     default: 'pending',
   },
-  scheduledBy: { type: String, enum: ['customer', 'owner'], default: 'customer' },
   ownerNote:       { type: String, default: '' },
   rescheduleDate:  { type: Date,   default: null },
   rescheduleTime:  { type: String, default: '' },

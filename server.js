@@ -3,92 +3,44 @@ const mongoose = require('mongoose');
 const cors     = require('cors');
 const morgan   = require('morgan');
 const path     = require('path');
-const http     = require('http');
-const { Server } = require('socket.io');
+const fs       = require('fs');
 require('dotenv').config();
 
-const app    = express();
-const server = http.createServer(app);
+const app = express();
 
-// ── Socket.io — WebRTC Signaling Server ──────────────────────
-const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
-  transports: ['websocket', 'polling'],
-});
-
-// Map: "userId:userType" -> socketId
-const onlineUsers = new Map();
-
-io.on('connection', (socket) => {
-  // User registers their socket after login
-  socket.on('register', ({ userId, userType }) => {
-    if (!userId || !userType) return;
-    const key = `${userId}:${userType}`;
-    onlineUsers.set(key, socket.id);
-    console.log(`📞 Registered ${key} -> ${socket.id}`);
-  });
-
-  // Caller initiates a call
-  socket.on('call-user', ({ toUserId, toUserType, fromUserId, fromUserType, fromName, offer }) => {
-    const key      = `${toUserId}:${toUserType}`;
-    const toSocket = onlineUsers.get(key);
-    if (toSocket) {
-      io.to(toSocket).emit('call-incoming', { fromUserId, fromUserType, fromName, offer });
-      console.log(`📞 Call from ${fromUserId} to ${toUserId}`);
-    } else {
-      socket.emit('call-unavailable');
-      console.log(`📞 ${toUserId} not online`);
-    }
-  });
-
-  // Callee accepts the call
-  socket.on('call-accepted', ({ toUserId, toUserType, answer }) => {
-    const key      = `${toUserId}:${toUserType}`;
-    const toSocket = onlineUsers.get(key);
-    if (toSocket) io.to(toSocket).emit('call-accepted', { answer });
-  });
-
-  // Callee rejects the call
-  socket.on('call-rejected', ({ toUserId, toUserType }) => {
-    const key      = `${toUserId}:${toUserType}`;
-    const toSocket = onlineUsers.get(key);
-    if (toSocket) io.to(toSocket).emit('call-rejected');
-  });
-
-  // ICE candidate exchange
-  socket.on('ice-candidate', ({ toUserId, toUserType, candidate }) => {
-    const key      = `${toUserId}:${toUserType}`;
-    const toSocket = onlineUsers.get(key);
-    if (toSocket) io.to(toSocket).emit('ice-candidate', { candidate });
-  });
-
-  // Either party ends the call
-  socket.on('call-ended', ({ toUserId, toUserType }) => {
-    const key      = `${toUserId}:${toUserType}`;
-    const toSocket = onlineUsers.get(key);
-    if (toSocket) io.to(toSocket).emit('call-ended');
-  });
-
-  // Clean up on disconnect
-  socket.on('disconnect', () => {
-    onlineUsers.forEach((sid, key) => {
-      if (sid === socket.id) {
-        onlineUsers.delete(key);
-        console.log(`📞 Disconnected: ${key}`);
-      }
-    });
-  });
+// ── Create upload directories at startup ──────────────────────
+const uploadDirs = [
+  path.join(__dirname, 'uploads'),
+  path.join(__dirname, 'uploads', 'photos'),
+  path.join(__dirname, 'uploads', 'documents'),
+];
+uploadDirs.forEach(dir => {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+    console.log(`📁 Created: ${dir}`);
+  }
 });
 
 // ── Middleware ────────────────────────────────────────────────
-app.use(cors({ origin: '*', credentials: true }));
-app.use(express.json());
+app.use(cors({
+  origin: '*',
+  credentials: true,
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
+  allowedHeaders: ['Content-Type','Authorization','Accept'],
+}));
+
+// Handle CORS preflight for all routes (important for multipart uploads from Flutter Web)
+app.options('*', cors());
+
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(morgan('dev'));
 
-// ── Serve local uploads ───────────────────────────────────────
+// ── Serve local uploads with correct CORS headers ─────────────
 app.use('/uploads', (req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.setHeader('Cache-Control', 'public, max-age=86400');
   next();
 }, express.static(path.join(__dirname, 'uploads')));
 
@@ -99,14 +51,32 @@ app.use('/api/visits',        require('./routes/visits'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/messages',      require('./routes/messages'));
 app.use('/api/admin',         require('./routes/admin'));
+
+// Pre-load models
 require('./models/Chat');
 require('./models/Message');
 require('./models/Favourite');
-app.use('/api/customers',     require('./routes/customers'));
+
+app.use('/api/customers', require('./routes/customers'));
+
+// ── Health check ──────────────────────────────────────────────
+app.get('/health', (req, res) => {
+  res.json({
+    status:  'ok',
+    uploads: fs.existsSync(path.join(__dirname, 'uploads')) ? 'ready' : 'missing',
+  });
+});
 
 // ── Global error handler ──────────────────────────────────────
 app.use((err, req, res, next) => {
   console.error('❌ Error:', err.message);
+  // Multer errors
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ success: false, message: 'File too large. Max 10MB for documents, 5MB for photos.' });
+  }
+  if (err.message && (err.message.includes('Only') || err.message.includes('allowed'))) {
+    return res.status(415).json({ success: false, message: err.message });
+  }
   res.status(err.statusCode || 500).json({
     success: false,
     message: err.message || 'Server error',
@@ -119,7 +89,7 @@ mongoose
   .connect(process.env.MONGO_URI)
   .then(() => {
     console.log('✅ MongoDB connected');
-    server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+    app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
   })
   .catch((err) => {
     console.error('❌ MongoDB connection error:', err.message);

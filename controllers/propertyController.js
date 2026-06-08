@@ -1,7 +1,7 @@
 const Property     = require('../models/Property');
 const Notification = require('../models/Notification');
 const path         = require('path');
-const { cloudinaryConfigured } = require('../config/cloudinary');
+const { cloudinaryConfigured, fileToUrl } = require('../config/cloudinary');
 
 // ── Helper: convert multer file to storable URL/path ─────────
 const fileUrl = (file) => {

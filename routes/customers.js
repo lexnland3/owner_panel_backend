@@ -25,6 +25,18 @@ try {
       phone: { type: String, default: "" },
       password: { type: String, select: false },
       googleId: { type: String, default: null },
+      // ── Profile details ──
+      age: { type: Number, default: null },
+      gender: {
+        type: String,
+        enum: ["male", "female", "other", ""],
+        default: "",
+      },
+      occupation: { type: String, default: "" },
+      state: { type: String, default: "" },
+      city: { type: String, default: "" },
+      lookingFor: { type: String, default: "" }, // optional: plot / pg / guest
+      profilePhoto: { type: String, default: null }, // optional
     },
     { timestamps: true },
   );
@@ -91,7 +103,7 @@ const ownerAuth = async (req, res, next) => {
 
 router.post("/register", async (req, res, next) => {
   try {
-    const { name, email, phone, password } = req.body;
+    const { name, email, phone, password, state, city } = req.body;
     if (!name || !email || !password)
       return res
         .status(400)
@@ -105,6 +117,8 @@ router.post("/register", async (req, res, next) => {
       email,
       phone: phone || "",
       password,
+      state: state || "",
+      city: city || "",
     });
     const token = jwt.sign(
       { id: customer._id, role: "customer" },
@@ -151,6 +165,33 @@ router.post("/login", async (req, res, next) => {
 router.get("/me", customerAuth, async (req, res, next) => {
   try {
     res.json({ success: true, customer: req.customer });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// PATCH /customers/me — update customer profile details
+router.patch("/me", customerAuth, async (req, res, next) => {
+  try {
+    const allowed = [
+      "name",
+      "phone",
+      "age",
+      "gender",
+      "occupation",
+      "state",
+      "city",
+      "lookingFor",
+      "profilePhoto",
+    ];
+    const updates = {};
+    for (const k of allowed)
+      if (req.body[k] !== undefined) updates[k] = req.body[k];
+    const customer = await Customer.findByIdAndUpdate(req.customerId, updates, {
+      new: true,
+      runValidators: true,
+    });
+    res.json({ success: true, customer });
   } catch (err) {
     next(err);
   }

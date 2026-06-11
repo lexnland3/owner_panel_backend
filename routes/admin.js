@@ -3,7 +3,6 @@ const router = express.Router();
 const Property = require("../models/Property");
 const Owner = require("../models/Owner");
 const Notification = require("../models/Notification");
-const SupportTicket = require("../models/SupportTicket");
 
 // ── Admin auth middleware ─────────────────────────────────────
 const adminAuth = (req, res, next) => {
@@ -121,6 +120,9 @@ router.get("/properties", async (req, res, next) => {
     if (req.query.type) {
       filter.propertyType = req.query.type;
     }
+    if (req.query.pendingReview === "true") {
+      filter.pendingAdminReview = true;
+    }
     if (req.query.search) {
       filter.$or = [
         { propertyName: { $regex: req.query.search, $options: "i" } },
@@ -199,6 +201,7 @@ router.patch("/properties/:id/verify", async (req, res, next) => {
     if (rejectionNote !== undefined) {
       update.rejectionNote = rejectionNote;
     }
+    update.pendingAdminReview = false; // admin has now acted → clear re-review flag
 
     const property = await Property.findByIdAndUpdate(req.params.id, update, {
       new: true,
@@ -254,6 +257,7 @@ router.patch("/properties/:id/suspend", async (req, res, next) => {
         status: "suspended",
         isVerified: false,
         rejectionNote: suspensionReason.trim(),
+        pendingAdminReview: false, // admin acted (re-suspended with a reason)
       },
       { new: true },
     ).populate(
@@ -298,6 +302,7 @@ router.patch("/properties/:id/reinstate", async (req, res, next) => {
         status: "under_review",
         isVerified: false,
         rejectionNote: "",
+        pendingAdminReview: false, // admin acted (reinstated for owner to fix)
       },
       { new: true },
     ).populate(
@@ -419,35 +424,6 @@ router.get("/visits", async (req, res, next) => {
         .sort({ createdAt: -1 });
     } catch (_) {}
     res.json({ success: true, count: visits.length, visits });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ── GET /api/admin/support — list all problem submissions ─────
-router.get("/support", async (req, res, next) => {
-  try {
-    const tickets = await SupportTicket.find().sort({ createdAt: -1 });
-    const open = tickets.filter((t) => t.status === "open").length;
-    res.json({ success: true, count: tickets.length, open, tickets });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ── PATCH /api/admin/support/:id/resolve — mark resolved ──────
-router.patch("/support/:id/resolve", async (req, res, next) => {
-  try {
-    const ticket = await SupportTicket.findByIdAndUpdate(
-      req.params.id,
-      { status: "resolved" },
-      { new: true },
-    );
-    if (!ticket)
-      return res
-        .status(404)
-        .json({ success: false, message: "Ticket not found" });
-    res.json({ success: true, ticket });
   } catch (err) {
     next(err);
   }

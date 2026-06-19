@@ -6,6 +6,7 @@ const Chat = require("../models/Chat");
 const Message = require("../models/Message");
 const Notification = require("../models/Notification");
 const Favourite = require("../models/Favourite");
+const Rating = require("../models/Rating");
 const SupportTicket = require("../models/SupportTicket");
 const Owner = require("../models/Owner");
 const { detectPhone } = require("../utils/phoneDetector");
@@ -125,13 +126,11 @@ router.post("/register", async (req, res, next) => {
       process.env.JWT_SECRET,
       { expiresIn: "30d" },
     );
-    res
-      .status(201)
-      .json({
-        success: true,
-        token,
-        customer: { _id: customer._id, name, email, phone },
-      });
+    res.status(201).json({
+      success: true,
+      token,
+      customer: { _id: customer._id, name, email, phone },
+    });
   } catch (err) {
     next(err);
   }
@@ -217,14 +216,12 @@ router.post("/google", async (req, res, next) => {
         .status(400)
         .json({ success: false, message: "Could not get email from Google" });
     if (await Owner.findOne({ email }))
-      return res
-        .status(403)
-        .json({
-          success: false,
-          isOwner: true,
-          message:
-            "This Google account is registered as a property owner. Please use the Owner Panel app.",
-        });
+      return res.status(403).json({
+        success: false,
+        isOwner: true,
+        message:
+          "This Google account is registered as a property owner. Please use the Owner Panel app.",
+      });
     let customer = await Customer.findOne({
       $or: [{ googleId: uid }, { email }],
     });
@@ -266,11 +263,6 @@ router.get("/plots", async (req, res, next) => {
     const filter = { propertyType: "plot", status: "active", isVerified: true };
     if (req.query.facing) filter["plotDetails.facing"] = req.query.facing;
     if (req.query.plotType) filter["plotDetails.plotType"] = req.query.plotType;
-    if (req.query.search)
-      filter.$or = [
-        { propertyName: { $regex: req.query.search, $options: "i" } },
-        { location: { $regex: req.query.search, $options: "i" } },
-      ];
     if (req.query.minPrice || req.query.maxPrice) {
       filter["plotDetails.totalPrice"] = {};
       if (req.query.minPrice)
@@ -278,6 +270,30 @@ router.get("/plots", async (req, res, next) => {
       if (req.query.maxPrice)
         filter["plotDetails.totalPrice"].$lte = Number(req.query.maxPrice);
     }
+
+    // Properties store a free-text `location` (e.g. "Amritsar, Punjab"), so
+    // search / city / state all match against propertyName + location.
+    const esc = (t) => String(t).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const and = [];
+
+    // Refined search: EVERY word must appear in the name or the location.
+    if (req.query.search && req.query.search.trim()) {
+      for (const term of req.query.search.trim().split(/\s+/)) {
+        const rx = { $regex: esc(term), $options: "i" };
+        and.push({ $or: [{ propertyName: rx }, { location: rx }] });
+      }
+    }
+    // State / City filter — matched against the plot's location text.
+    if (req.query.state && req.query.state.trim())
+      and.push({
+        location: { $regex: esc(req.query.state.trim()), $options: "i" },
+      });
+    if (req.query.city && req.query.city.trim())
+      and.push({
+        location: { $regex: esc(req.query.city.trim()), $options: "i" },
+      });
+
+    if (and.length) filter.$and = and;
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(20, parseInt(req.query.limit) || 10);
     const [properties, total] = await Promise.all([
@@ -313,6 +329,77 @@ router.get("/plots/:id", async (req, res, next) => {
         .status(404)
         .json({ success: false, message: "Plot not found" });
     res.json({ success: true, property });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ════════════════════════════════════════════
+//  PLOT RATINGS  (customer side)
+// ════════════════════════════════════════════
+
+// Submit or update this customer's rating for a plot, then recompute average
+router.post("/plots/:id/rate", customerAuth, async (req, res, next) => {
+  try {
+    const r = Number(req.body.rating);
+    if (!Number.isFinite(r) || r < 1 || r > 5)
+      return res
+        .status(400)
+        .json({ success: false, message: "Rating must be between 1 and 5" });
+
+    const plot = await Property.findOne({
+      _id: req.params.id,
+      propertyType: "plot",
+    });
+    if (!plot)
+      return res
+        .status(404)
+        .json({ success: false, message: "Plot not found" });
+
+    // upsert this customer's rating (one per customer per plot)
+    await Rating.findOneAndUpdate(
+      { property: plot._id, customer: req.customerId },
+      { rating: Math.round(r) },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+
+    // recompute average + count from all ratings
+    const agg = await Rating.aggregate([
+      { $match: { property: plot._id } },
+      {
+        $group: {
+          _id: "$property",
+          avg: { $avg: "$rating" },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+    const avg = agg.length ? Math.round(agg[0].avg * 10) / 10 : 0;
+    const count = agg.length ? agg[0].count : 0;
+
+    plot.ratingAverage = avg;
+    plot.ratingCount = count;
+    await plot.save();
+
+    res.json({
+      success: true,
+      ratingAverage: avg,
+      ratingCount: count,
+      myRating: Math.round(r),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Get this customer's own rating for a plot (0 = not rated yet)
+router.get("/plots/:id/my-rating", customerAuth, async (req, res, next) => {
+  try {
+    const rt = await Rating.findOne({
+      property: req.params.id,
+      customer: req.customerId,
+    });
+    res.json({ success: true, myRating: rt ? rt.rating : 0 });
   } catch (err) {
     next(err);
   }
@@ -362,6 +449,17 @@ router.post("/visits", customerAuth, async (req, res, next) => {
       visitDate: new Date(visitDate),
       visitTime,
       requirement: requirement || "",
+      status: "pending",
+      proposedBy: "customer",
+      awaitingFrom: "owner", // customer proposed -> owner's turn
+      proposals: [
+        {
+          by: "customer",
+          date: new Date(visitDate),
+          time: visitTime,
+          note: requirement || "",
+        },
+      ],
     });
 
     // Notify owner — important, kept concise
@@ -395,13 +493,96 @@ router.patch("/visits/:id/cancel", customerAuth, async (req, res, next) => {
   try {
     const visit = await Visit.findOneAndUpdate(
       { _id: req.params.id, customer: req.customerId },
-      { status: "cancelled" },
+      { status: "cancelled", awaitingFrom: null },
       { new: true },
     );
     if (!visit)
       return res
         .status(404)
         .json({ success: false, message: "Visit not found" });
+    res.json({ success: true, visit });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Customer ACCEPTS the slot currently on the table (e.g. owner's proposal)
+router.patch("/visits/:id/accept", customerAuth, async (req, res, next) => {
+  try {
+    const visit = await Visit.findOne({
+      _id: req.params.id,
+      customer: req.customerId,
+    }).populate("property", "propertyName");
+    if (!visit)
+      return res
+        .status(404)
+        .json({ success: false, message: "Visit not found" });
+    if (visit.awaitingFrom !== "customer")
+      return res
+        .status(400)
+        .json({ success: false, message: "Nothing to accept right now" });
+
+    visit.status = "confirmed";
+    visit.awaitingFrom = null;
+    await visit.save();
+
+    // Notify owner that the customer accepted.
+    await Notification.create({
+      owner: visit.owner,
+      title: "✅ Visit Accepted",
+      message: `${visit.visitorName} accepted the visit for "${visit.property?.propertyName || "your property"}".`,
+      type: "visit",
+    });
+
+    res.json({ success: true, visit });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Customer COUNTER-PROPOSES a different slot -> ball goes back to owner
+router.patch("/visits/:id/propose", customerAuth, async (req, res, next) => {
+  try {
+    const { newDate, newTime, note } = req.body;
+    if (!newDate || !newTime)
+      return res
+        .status(400)
+        .json({ success: false, message: "newDate and newTime required" });
+
+    const visit = await Visit.findOne({
+      _id: req.params.id,
+      customer: req.customerId,
+    }).populate("property", "propertyName");
+    if (!visit)
+      return res
+        .status(404)
+        .json({ success: false, message: "Visit not found" });
+    if (["confirmed", "cancelled", "completed"].includes(visit.status))
+      return res
+        .status(400)
+        .json({ success: false, message: "This visit is already settled" });
+
+    visit.visitDate = new Date(newDate);
+    visit.visitTime = newTime;
+    visit.status = "rescheduled"; // active proposal on the table
+    visit.awaitingFrom = "owner"; // owner's turn now
+    visit.proposedBy = "customer";
+    visit.proposals.push({
+      by: "customer",
+      date: new Date(newDate),
+      time: newTime,
+      note: note || "",
+    });
+    await visit.save();
+
+    // Notify owner of the customer's counter-proposal.
+    await Notification.create({
+      owner: visit.owner,
+      title: "🔁 New Time Proposed",
+      message: `${visit.visitorName} proposed a new time for "${visit.property?.propertyName || "your property"}": ${new Date(newDate).toLocaleDateString("en-IN")} at ${newTime}.`,
+      type: "visit",
+    });
+
     res.json({ success: true, visit });
   } catch (err) {
     next(err);
@@ -416,27 +597,30 @@ router.patch("/visits/:id/cancel", customerAuth, async (req, res, next) => {
 router.post("/chats", customerAuth, async (req, res, next) => {
   try {
     const { plotId, ownerId } = req.body;
-    if (!plotId || !ownerId)
+    if (!ownerId)
       return res
         .status(400)
-        .json({ success: false, message: "plotId and ownerId required" });
+        .json({ success: false, message: "ownerId required" });
+    // One thread per customer-owner pair (not per plot).
     let chat = await Chat.findOne({
       customer: req.customerId,
       owner: ownerId,
-      property: plotId,
-    })
-      .populate("property", "propertyName photos")
-      .populate("owner", "name");
+    });
     if (!chat) {
       chat = await Chat.create({
         customer: req.customerId,
         owner: ownerId,
-        property: plotId,
+        property: plotId || null,
       });
-      chat = await Chat.findById(chat._id)
-        .populate("property", "propertyName photos")
-        .populate("owner", "name");
+    } else if (plotId && String(chat.property) !== String(plotId)) {
+      // Same owner, different plot → keep the single thread, just refresh
+      // the plot shown as context in the list/header.
+      chat.property = plotId;
+      await chat.save();
     }
+    chat = await Chat.findById(chat._id)
+      .populate("property", "propertyName photos")
+      .populate("owner", "name");
     res.json({ success: true, chat });
   } catch (err) {
     next(err);
@@ -947,12 +1131,10 @@ router.delete(
           msg.senderType !== "customer" ||
           String(msg.senderId) !== String(req.customerId)
         )
-          return res
-            .status(403)
-            .json({
-              success: false,
-              message: "Only the sender can delete for everyone",
-            });
+          return res.status(403).json({
+            success: false,
+            message: "Only the sender can delete for everyone",
+          });
         // Remove the actual image from storage (Cloudinary/local) immediately
         if (msg.imageUrl) {
           try {
@@ -1001,12 +1183,10 @@ router.delete(
           msg.senderType !== "owner" ||
           String(msg.senderId) !== String(req.ownerId)
         )
-          return res
-            .status(403)
-            .json({
-              success: false,
-              message: "Only the sender can delete for everyone",
-            });
+          return res.status(403).json({
+            success: false,
+            message: "Only the sender can delete for everyone",
+          });
         // Remove the actual image from storage (Cloudinary/local) immediately
         if (msg.imageUrl) {
           try {
@@ -1162,13 +1342,11 @@ router.post("/support", customerAuth, async (req, res, next) => {
       email: customer.email,
       message: message.trim(),
     });
-    res
-      .status(201)
-      .json({
-        success: true,
-        message: "Your problem has been sent to our team",
-        ticket,
-      });
+    res.status(201).json({
+      success: true,
+      message: "Your problem has been sent to our team",
+      ticket,
+    });
   } catch (err) {
     next(err);
   }
@@ -1196,13 +1374,11 @@ router.post("/owner-support", ownerAuth, async (req, res, next) => {
       email: owner.email,
       message: message.trim(),
     });
-    res
-      .status(201)
-      .json({
-        success: true,
-        message: "Your problem has been sent to our team",
-        ticket,
-      });
+    res.status(201).json({
+      success: true,
+      message: "Your problem has been sent to our team",
+      ticket,
+    });
   } catch (err) {
     next(err);
   }

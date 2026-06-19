@@ -81,12 +81,10 @@ app.use((err, req, res, next) => {
   console.error("❌ Error:", err.message);
   // Multer errors
   if (err.code === "LIMIT_FILE_SIZE") {
-    return res
-      .status(413)
-      .json({
-        success: false,
-        message: "File too large. Max 10MB for documents, 5MB for photos.",
-      });
+    return res.status(413).json({
+      success: false,
+      message: "File too large. Max 10MB for documents, 5MB for photos.",
+    });
   }
   if (
     err.message &&
@@ -102,10 +100,100 @@ app.use((err, req, res, next) => {
 
 // ── Start ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 5000;
+
+// ── One-time self-healing migration: merge per-plot chats into per-owner ──
+// Safe to run on every boot. Drops the old (customer,owner,property) unique
+// index, merges any duplicate (customer,owner) threads into the oldest one,
+// then builds the new (customer,owner) unique index.
+async function migrateChatsToPerOwner() {
+  const Chat = mongoose.model("Chat");
+  const Message = mongoose.model("Message");
+  const coll = Chat.collection;
+
+  try {
+    const indexes = await coll.indexes();
+    for (const idx of indexes) {
+      if (
+        idx.key &&
+        idx.key.customer === 1 &&
+        idx.key.owner === 1 &&
+        idx.key.property === 1
+      ) {
+        await coll.dropIndex(idx.name);
+        console.log(`🧹 Dropped old chat index: ${idx.name}`);
+      }
+    }
+  } catch (e) {
+    console.warn("Chat index cleanup skipped:", e.message);
+  }
+
+  try {
+    const dups = await Chat.aggregate([
+      {
+        $group: {
+          _id: { customer: "$customer", owner: "$owner" },
+          ids: { $push: "$_id" },
+          count: { $sum: 1 },
+        },
+      },
+      { $match: { count: { $gt: 1 } } },
+    ]);
+
+    for (const group of dups) {
+      const chats = await Chat.find({ _id: { $in: group.ids } }).sort({
+        createdAt: 1,
+      });
+      const keep = chats[0];
+      const removeIds = chats.slice(1).map((c) => c._id);
+
+      // Move every message from the duplicate threads onto the kept one.
+      await Message.updateMany(
+        { chat: { $in: removeIds } },
+        { $set: { chat: keep._id } },
+      );
+
+      const newest = chats.reduce(
+        (a, b) => (b.lastMessageAt > a.lastMessageAt ? b : a),
+        keep,
+      );
+      const unreadByOwner = chats.reduce(
+        (s, c) => s + (c.unreadByOwner || 0),
+        0,
+      );
+      const unreadByCustomer = chats.reduce(
+        (s, c) => s + (c.unreadByCustomer || 0),
+        0,
+      );
+
+      await Chat.findByIdAndUpdate(keep._id, {
+        lastMessage: newest.lastMessage,
+        lastMessageAt: newest.lastMessageAt,
+        property: newest.property,
+        unreadByOwner,
+        unreadByCustomer,
+      });
+      await Chat.deleteMany({ _id: { $in: removeIds } });
+      console.log(
+        `🔀 Merged ${removeIds.length} duplicate chat(s) into ${keep._id}`,
+      );
+    }
+  } catch (e) {
+    console.warn("Chat merge skipped:", e.message);
+  }
+
+  try {
+    await Chat.syncIndexes();
+    console.log("✅ Chat indexes synced (one thread per customer-owner)");
+  } catch (e) {
+    console.warn("Chat syncIndexes warning:", e.message);
+  }
+}
+
 mongoose
   .connect(process.env.MONGO_URI)
-  .then(() => {
+  .then(async () => {
     console.log("✅ MongoDB connected");
+    await migrateChatsToPerOwner();
     app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
   })
   .catch((err) => {

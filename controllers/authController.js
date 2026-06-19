@@ -36,22 +36,18 @@ exports.googleAuth = async (req, res, next) => {
     // Verify token with Firebase Admin SDK
     const result = await verifyFirebaseToken(idToken);
     if (!result.valid)
-      return res
-        .status(401)
-        .json({
-          success: false,
-          message: `Invalid Firebase token: ${result.error}`,
-        });
+      return res.status(401).json({
+        success: false,
+        message: `Invalid Firebase token: ${result.error}`,
+      });
 
     const { uid, email, name, picture } = result.decoded;
 
     if (!email)
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Could not get email from Google account",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Could not get email from Google account",
+      });
 
     // Find existing or create new owner
     let owner = await Owner.findOne({ $or: [{ googleId: uid }, { email }] });
@@ -103,29 +99,23 @@ exports.register = async (req, res, next) => {
   try {
     const { name, email, phone, password, state, city } = req.body;
     if (!name || !email || !password)
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Name, email and password are required",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Name, email and password are required",
+      });
 
     const existing = await Owner.findOne({ email });
     if (existing) {
       if (existing.authMethod === "google")
-        return res
-          .status(400)
-          .json({
-            success: false,
-            message:
-              "This email is registered with Google. Please use Google sign-in.",
-          });
-      return res
-        .status(400)
-        .json({
+        return res.status(400).json({
           success: false,
-          message: "Email already registered. Please sign in.",
+          message:
+            "This email is registered with Google. Please use Google sign-in.",
         });
+      return res.status(400).json({
+        success: false,
+        message: "Email already registered. Please sign in.",
+      });
     }
 
     const owner = await Owner.create({
@@ -247,13 +237,11 @@ exports.login = async (req, res, next) => {
         .json({ success: false, message: "Invalid email or password" });
 
     if (owner.authMethod === "google")
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message:
-            "This account uses Google sign-in. Please use the Google button.",
-        });
+      return res.status(400).json({
+        success: false,
+        message:
+          "This account uses Google sign-in. Please use the Google button.",
+      });
 
     if (!(await owner.matchPassword(password)))
       return res
@@ -303,13 +291,11 @@ exports.forgotPassword = async (req, res, next) => {
       });
 
     if (owner.authMethod === "google")
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message:
-            "This account uses Google sign-in. Password reset is not available.",
-        });
+      return res.status(400).json({
+        success: false,
+        message:
+          "This account uses Google sign-in. Password reset is not available.",
+      });
 
     const otp = owner.generateOTP("reset");
     await owner.save({ validateBeforeSave: false });
@@ -376,12 +362,10 @@ exports.resetPassword = async (req, res, next) => {
         .status(400)
         .json({ success: false, message: "All fields required" });
     if (newPassword.length < 6)
-      return res
-        .status(400)
-        .json({
-          success: false,
-          message: "Password must be at least 6 characters",
-        });
+      return res.status(400).json({
+        success: false,
+        message: "Password must be at least 6 characters",
+      });
 
     const owner = await Owner.findOne({ email }).select(
       "+password +otp +otpExpiry",
@@ -524,12 +508,10 @@ exports.saveOwnerDetails = async (req, res, next) => {
 exports.createPaymentLink = async (req, res, next) => {
   try {
     if (!razorpayConfigured)
-      return res
-        .status(503)
-        .json({
-          success: false,
-          message: "Payment is not configured yet. Add Razorpay keys to .env.",
-        });
+      return res.status(503).json({
+        success: false,
+        message: "Payment is not configured yet. Add Razorpay keys to .env.",
+      });
 
     const o = req.owner;
     const link = await razorpay.paymentLink.create({
@@ -551,6 +533,112 @@ exports.createPaymentLink = async (req, res, next) => {
     await o.save({ validateBeforeSave: false });
 
     res.json({ success: true, url: link.short_url, linkId: link.id });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ════════════════════════════════════════════════════════════
+//  RAZORPAY STANDARD CHECKOUT  (order + signature verification)
+//  Used by the Owner Panel Flutter app for the one-time ₹100 fee.
+// ════════════════════════════════════════════════════════════
+
+// POST /api/auth/payment/create-order — create a Razorpay order for the fee
+exports.createPaymentOrder = async (req, res, next) => {
+  try {
+    if (!razorpayConfigured)
+      return res.status(503).json({
+        success: false,
+        message: "Payment is not configured yet. Add Razorpay keys to .env.",
+      });
+
+    const o = req.owner;
+    if (o.isPaid)
+      return res.json({ success: true, alreadyPaid: true, isPaid: true });
+
+    const amount = REGISTRATION_FEE_PAISE; // paise (₹100 = 10000)
+    if (!Number.isInteger(amount) || amount < 100)
+      return res
+        .status(400)
+        .json({ success: false, message: "Invalid amount (min 100 paise)" });
+
+    let order;
+    try {
+      order = await razorpay.orders.create({
+        amount,
+        currency: "INR",
+        receipt: `reg_${Date.now()}`,
+        notes: { ownerId: o._id.toString(), purpose: "owner_registration" },
+      });
+    } catch (rzpErr) {
+      console.error("❌ Razorpay order error:", rzpErr.message || rzpErr);
+      // 401 from Razorpay = bad keys; everything else = upstream failure
+      const status = rzpErr.statusCode === 401 ? 401 : 500;
+      return res.status(status).json({
+        success: false,
+        message:
+          status === 401
+            ? "Razorpay authentication failed. Check your keys."
+            : "Could not create payment order. Please try again.",
+      });
+    }
+
+    o.paymentOrderId = order.id;
+    await o.save({ validateBeforeSave: false });
+
+    res.json({
+      success: true,
+      orderId: order.id,
+      amount: order.amount,
+      currency: order.currency,
+      keyId: process.env.RAZORPAY_KEY_ID, // publishable key — safe to send to client
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /api/auth/payment/verify — verify the signature, then mark the owner paid
+exports.verifyPayment = async (req, res, next) => {
+  try {
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } =
+      req.body;
+
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature)
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing payment fields" });
+
+    if (!process.env.RAZORPAY_KEY_SECRET)
+      return res
+        .status(503)
+        .json({ success: false, message: "Payment is not configured." });
+
+    // HMAC-SHA256(order_id + "|" + payment_id, KEY_SECRET)
+    const expected = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest("hex");
+
+    const expectedBuf = Buffer.from(expected, "utf8");
+    const receivedBuf = Buffer.from(String(razorpay_signature), "utf8");
+    const valid =
+      expectedBuf.length === receivedBuf.length &&
+      crypto.timingSafeEqual(expectedBuf, receivedBuf);
+
+    if (!valid)
+      return res
+        .status(400)
+        .json({ success: false, message: "Payment verification failed" });
+
+    const o = req.owner;
+    o.isPaid = true;
+    o.paymentId = razorpay_payment_id;
+    o.paymentOrderId = razorpay_order_id;
+    if (o.accountStatus === "pending") o.accountStatus = "active";
+    await o.save({ validateBeforeSave: false });
+
+    res.json({ success: true, message: "Payment verified", isPaid: true });
   } catch (err) {
     next(err);
   }

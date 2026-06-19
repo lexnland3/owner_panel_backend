@@ -30,6 +30,10 @@ const PropertySchema = new mongoose.Schema(
     pendingAdminReview: { type: Boolean, default: false },
     lastOwnerUpdateAt: { type: Date, default: null },
 
+    // ── Ratings (computed from Rating collection) ─────────
+    ratingAverage: { type: Number, default: 0 },
+    ratingCount: { type: Number, default: 0 },
+
     // ── Media ─────────────────────────────────────────────
     photos: [{ type: String }],
     registryDocument: { type: String, default: null },

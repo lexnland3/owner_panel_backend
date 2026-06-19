@@ -16,6 +16,8 @@ const {
   uploadElectricityBill,
   saveOwnerDetails,
   createPaymentLink,
+  createPaymentOrder,
+  verifyPayment,
   paymentStatus,
 } = require("../controllers/authController");
 const { uploadDocuments: uploadDocs } = require("../config/cloudinary");
@@ -38,6 +40,9 @@ router.post("/electricity-bill", protect, uploadElectricityBill);
 // ── Owner onboarding details + registration payment ──────────
 router.patch("/owner-details", protect, saveOwnerDetails);
 router.post("/payment/create-link", protect, createPaymentLink);
+// ── Razorpay Standard Checkout (order + signature verify) ────
+router.post("/payment/create-order", protect, createPaymentOrder);
+router.post("/payment/verify", protect, verifyPayment);
 router.get("/payment/status", protect, paymentStatus);
 
 // ── POST /api/auth/upload-aadhaar  (owner Aadhaar verification) ──

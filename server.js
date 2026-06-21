@@ -81,10 +81,12 @@ app.use((err, req, res, next) => {
   console.error("❌ Error:", err.message);
   // Multer errors
   if (err.code === "LIMIT_FILE_SIZE") {
-    return res.status(413).json({
-      success: false,
-      message: "File too large. Max 10MB for documents, 5MB for photos.",
-    });
+    return res
+      .status(413)
+      .json({
+        success: false,
+        message: "File too large. Max 10MB for documents, 5MB for photos.",
+      });
   }
   if (
     err.message &&
@@ -156,10 +158,7 @@ async function migrateChatsToPerOwner() {
         (a, b) => (b.lastMessageAt > a.lastMessageAt ? b : a),
         keep,
       );
-      const unreadByOwner = chats.reduce(
-        (s, c) => s + (c.unreadByOwner || 0),
-        0,
-      );
+      const unreadByOwner = chats.reduce((s, c) => s + (c.unreadByOwner || 0), 0);
       const unreadByCustomer = chats.reduce(
         (s, c) => s + (c.unreadByCustomer || 0),
         0,

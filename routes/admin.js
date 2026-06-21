@@ -1,5 +1,6 @@
 const express = require("express");
 const router = express.Router();
+const mongoose = require("mongoose");
 const Property = require("../models/Property");
 const Owner = require("../models/Owner");
 const Notification = require("../models/Notification");
@@ -88,11 +89,17 @@ router.get("/stats", async (req, res, next) => {
       totalVisits = await Visit.countDocuments();
     } catch (_) {}
 
+    let totalCustomers = 0;
+    try {
+      totalCustomers = await mongoose.model("Customer").countDocuments();
+    } catch (_) {}
+
     res.json({
       success: true,
       stats: {
         totalProperties,
         totalOwners,
+        totalCustomers,
         totalVisits,
         byStatus: {
           active,
@@ -424,6 +431,274 @@ router.get("/visits", async (req, res, next) => {
         .sort({ createdAt: -1 });
     } catch (_) {}
     res.json({ success: true, count: visits.length, visits });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/admin/customers ──────────────────────────────────
+// Every customer + their engagement counts (chats, favourites, visits)
+router.get("/customers", async (req, res, next) => {
+  try {
+    const Customer = mongoose.model("Customer");
+    const q = (req.query.search || "").trim();
+    const filter = q
+      ? {
+          $or: [
+            { name: { $regex: q, $options: "i" } },
+            { email: { $regex: q, $options: "i" } },
+            { phone: { $regex: q, $options: "i" } },
+          ],
+        }
+      : {};
+    const customers = await Customer.find(filter)
+      .sort({ createdAt: -1 })
+      .lean();
+    const ids = customers.map((c) => c._id);
+
+    const Chat = require("../models/Chat");
+    const Favourite = require("../models/Favourite");
+    let Visit = null;
+    try {
+      Visit = require("../models/Visit");
+    } catch (_) {}
+
+    const grp = (Model) =>
+      Model
+        ? Model.aggregate([
+            { $match: { customer: { $in: ids } } },
+            { $group: { _id: "$customer", n: { $sum: 1 } } },
+          ])
+        : Promise.resolve([]);
+
+    const [chatAgg, favAgg, visitAgg] = await Promise.all([
+      grp(Chat),
+      grp(Favourite),
+      grp(Visit),
+    ]);
+    const toMap = (a) => {
+      const m = {};
+      a.forEach((x) => {
+        if (x._id) m[x._id.toString()] = x.n;
+      });
+      return m;
+    };
+    const cMap = toMap(chatAgg);
+    const fMap = toMap(favAgg);
+    const vMap = toMap(visitAgg);
+
+    const enriched = customers.map((c) => ({
+      ...c,
+      chatCount: cMap[c._id.toString()] || 0,
+      favouriteCount: fMap[c._id.toString()] || 0,
+      visitCount: vMap[c._id.toString()] || 0,
+    }));
+    res.json({ success: true, count: enriched.length, customers: enriched });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/admin/customers/:id ──────────────────────────────
+router.get("/customers/:id", async (req, res, next) => {
+  try {
+    const Customer = mongoose.model("Customer");
+    const customer = await Customer.findById(req.params.id).lean();
+    if (!customer) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Customer not found" });
+    }
+    let visits = [];
+    try {
+      const Visit = require("../models/Visit");
+      visits = await Visit.find({ customer: customer._id })
+        .populate("property", "propertyName location")
+        .sort({ createdAt: -1 })
+        .lean();
+    } catch (_) {}
+    res.json({ success: true, customer, visits });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── DELETE /api/admin/customers/:id ───────────────────────────
+router.delete("/customers/:id", async (req, res, next) => {
+  try {
+    const Customer = mongoose.model("Customer");
+    const customer = await Customer.findByIdAndDelete(req.params.id);
+    if (!customer) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Customer not found" });
+    }
+    // Cascade: clean up everything tied to this customer
+    const Favourite = require("../models/Favourite");
+    const Chat = require("../models/Chat");
+    const Message = require("../models/Message");
+    let Rating = null;
+    let Visit = null;
+    try {
+      Rating = require("../models/Rating");
+    } catch (_) {}
+    try {
+      Visit = require("../models/Visit");
+    } catch (_) {}
+    const chatIds = (
+      await Chat.find({ customer: customer._id }).select("_id").lean()
+    ).map((c) => c._id);
+    await Promise.all([
+      Favourite.deleteMany({ customer: customer._id }),
+      Rating ? Rating.deleteMany({ customer: customer._id }) : Promise.resolve(),
+      Visit ? Visit.deleteMany({ customer: customer._id }) : Promise.resolve(),
+      Chat.deleteMany({ customer: customer._id }),
+      Message.deleteMany({ chat: { $in: chatIds } }),
+    ]);
+    res.json({ success: true, message: "Customer deleted" });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/admin/chats ──────────────────────────────────────
+router.get("/chats", async (req, res, next) => {
+  try {
+    const Chat = require("../models/Chat");
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 20));
+    const total = await Chat.countDocuments();
+    const chats = await Chat.find()
+      .populate("customer", "name email")
+      .populate("owner", "name email")
+      .populate("property", "propertyName location")
+      .sort({ lastMessageAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+    res.json({
+      success: true,
+      chats,
+      count: total,
+      page,
+      pages: Math.ceil(total / limit) || 1,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── GET /api/admin/chats/:id/messages ─────────────────────────
+router.get("/chats/:id/messages", async (req, res, next) => {
+  try {
+    const Chat = require("../models/Chat");
+    const Message = require("../models/Message");
+    const chat = await Chat.findById(req.params.id)
+      .populate("customer", "name email")
+      .populate("owner", "name email")
+      .populate("property", "propertyName location")
+      .lean();
+    if (!chat) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Chat not found" });
+    }
+    const messages = await Message.find({ chat: chat._id })
+      .sort({ createdAt: 1 })
+      .lean();
+    res.json({ success: true, chat, messages });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── DELETE /api/admin/chats/:id ───────────────────────────────
+router.delete("/chats/:id", async (req, res, next) => {
+  try {
+    const Chat = require("../models/Chat");
+    const Message = require("../models/Message");
+    const chat = await Chat.findByIdAndDelete(req.params.id);
+    if (!chat) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Chat not found" });
+    }
+    await Message.deleteMany({ chat: chat._id });
+    res.json({ success: true, message: "Chat deleted" });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── PATCH /api/admin/owners/:id/suspend ───────────────────────
+router.patch("/owners/:id/suspend", async (req, res, next) => {
+  try {
+    const owner = await Owner.findByIdAndUpdate(
+      req.params.id,
+      { accountStatus: "suspended" },
+      { new: true },
+    );
+    if (!owner)
+      return res
+        .status(404)
+        .json({ success: false, message: "Owner not found" });
+    res.json({ success: true, message: "Owner suspended", owner });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── PATCH /api/admin/owners/:id/reinstate ─────────────────────
+router.patch("/owners/:id/reinstate", async (req, res, next) => {
+  try {
+    const owner = await Owner.findByIdAndUpdate(
+      req.params.id,
+      { accountStatus: "active" },
+      { new: true },
+    );
+    if (!owner)
+      return res
+        .status(404)
+        .json({ success: false, message: "Owner not found" });
+    res.json({ success: true, message: "Owner reinstated", owner });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── PATCH /api/admin/customers/:id/suspend ────────────────────
+router.patch("/customers/:id/suspend", async (req, res, next) => {
+  try {
+    const Customer = mongoose.model("Customer");
+    const customer = await Customer.findByIdAndUpdate(
+      req.params.id,
+      { isSuspended: true },
+      { new: true },
+    );
+    if (!customer)
+      return res
+        .status(404)
+        .json({ success: false, message: "Customer not found" });
+    res.json({ success: true, message: "Customer suspended", customer });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── PATCH /api/admin/customers/:id/reinstate ──────────────────
+router.patch("/customers/:id/reinstate", async (req, res, next) => {
+  try {
+    const Customer = mongoose.model("Customer");
+    const customer = await Customer.findByIdAndUpdate(
+      req.params.id,
+      { isSuspended: false },
+      { new: true },
+    );
+    if (!customer)
+      return res
+        .status(404)
+        .json({ success: false, message: "Customer not found" });
+    res.json({ success: true, message: "Customer reinstated", customer });
   } catch (err) {
     next(err);
   }

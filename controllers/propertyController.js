@@ -206,6 +206,35 @@ exports.getDashboardStats = async (req, res, next) => {
         Property.countDocuments({ owner: id, propertyType: "guest" }),
         Property.countDocuments({ owner: id, propertyType: "plot" }),
       ]);
+
+    // Reach + engagement across all of this owner's properties
+    const agg = await Property.aggregate([
+      { $match: { owner: id } },
+      {
+        $group: {
+          _id: null,
+          totalViews: { $sum: { $ifNull: ["$views", 0] } },
+          ratingSum: {
+            $sum: { $multiply: ["$ratingAverage", "$ratingCount"] },
+          },
+          ratingCount: { $sum: "$ratingCount" },
+        },
+      },
+    ]);
+    const totalViews = agg.length ? agg[0].totalViews : 0;
+    const avgRating =
+      agg.length && agg[0].ratingCount > 0
+        ? Math.round((agg[0].ratingSum / agg[0].ratingCount) * 10) / 10
+        : 0;
+
+    const Favourite = require("../models/Favourite");
+    const myIds = (
+      await Property.find({ owner: id }).select("_id").lean()
+    ).map((p) => p._id);
+    const totalFavourites = myIds.length
+      ? await Favourite.countDocuments({ property: { $in: myIds } })
+      : 0;
+
     res.status(200).json({
       success: true,
       stats: {
@@ -213,6 +242,9 @@ exports.getDashboardStats = async (req, res, next) => {
         active,
         underReview,
         inactive,
+        totalViews,
+        totalFavourites,
+        avgRating,
         byType: { pg, guest, plot },
       },
     });
@@ -231,7 +263,22 @@ exports.getMyProperties = async (req, res, next) => {
     if (req.query.type) {
       filter.propertyType = req.query.type;
     }
-    const properties = await Property.find(filter).sort({ createdAt: -1 });
+    const properties = await Property.find(filter).sort({ createdAt: -1 }).lean();
+
+    // Attach how many customers have favourited each property
+    const Favourite = require("../models/Favourite");
+    const ids = properties.map((p) => p._id);
+    const favCounts = await Favourite.aggregate([
+      { $match: { property: { $in: ids } } },
+      { $group: { _id: "$property", count: { $sum: 1 } } },
+    ]);
+    const favMap = {};
+    for (const f of favCounts) favMap[f._id.toString()] = f.count;
+    for (const p of properties) {
+      p.favouritesCount = favMap[p._id.toString()] || 0;
+      p.views = p.views || 0;
+    }
+
     res
       .status(200)
       .json({ success: true, count: properties.length, properties });
@@ -308,15 +355,17 @@ exports.updateProperty = async (req, res, next) => {
 exports.updatePropertyStatus = async (req, res, next) => {
   try {
     const { status } = req.body;
-    const allowed = ["active", "inactive", "under_review"];
+    const allowed = ["active", "inactive", "sold", "archived"];
     if (!allowed.includes(status)) {
       return res
         .status(400)
         .json({ success: false, message: "Invalid status" });
     }
+    const update = { status };
+    update.soldAt = status === "sold" ? new Date() : null;
     const property = await Property.findOneAndUpdate(
       { _id: req.params.id, owner: req.owner._id },
-      { status },
+      update,
       { new: true },
     );
     if (!property) {
@@ -339,7 +388,7 @@ exports.updatePropertyStatus = async (req, res, next) => {
 // ── DELETE /api/properties/:id ────────────────────────────────
 exports.deleteProperty = async (req, res, next) => {
   try {
-    const property = await Property.findOneAndDelete({
+    const property = await Property.findOne({
       _id: req.params.id,
       owner: req.owner._id,
     });
@@ -348,6 +397,44 @@ exports.deleteProperty = async (req, res, next) => {
         .status(404)
         .json({ success: false, message: "Property not found" });
     }
+
+    // ── Cascade: remove everything tied to this property ──────────
+    const Favourite = require("../models/Favourite");
+    const Rating = require("../models/Rating");
+    const Visit = require("../models/Visit");
+    const Chat = require("../models/Chat");
+
+    // Best-effort media cleanup (Cloudinary / local). Never blocks deletion.
+    try {
+      const { deleteImage } = require("../config/cloudinary");
+      const media = [
+        ...(property.photos || []),
+        property.registryDocument,
+        property.nocDocument,
+        property.idProofFront,
+        property.idProofBack,
+      ].filter(Boolean);
+      for (const url of media) {
+        try {
+          await deleteImage(url);
+        } catch (_) {}
+      }
+    } catch (_) {}
+
+    await Promise.all([
+      Favourite.deleteMany({ property: property._id }),
+      Rating.deleteMany({ property: property._id }),
+      Visit.deleteMany({ property: property._id }),
+      // Chats are keyed by customer+owner (not per plot). Keep the thread but
+      // clear the dangling context pointer to the now-deleted plot.
+      Chat.updateMany(
+        { property: property._id },
+        { $set: { property: null } },
+      ),
+    ]);
+
+    await Property.deleteOne({ _id: property._id });
+
     res.status(200).json({ success: true, message: "Property deleted" });
   } catch (err) {
     next(err);

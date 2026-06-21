@@ -20,9 +20,19 @@ const PropertySchema = new mongoose.Schema(
     // ── Status & Verification ─────────────────────────────
     status: {
       type: String,
-      enum: ["under_review", "active", "inactive", "rejected", "suspended"],
+      enum: [
+        "under_review",
+        "active",
+        "inactive",
+        "rejected",
+        "suspended",
+        "sold",
+        "archived",
+      ],
       default: "under_review",
     },
+    // When the owner marked this property as booked/sold
+    soldAt: { type: Date, default: null },
     // ✅ isVerified and rejectionNote — were missing before
     isVerified: { type: Boolean, default: false },
     rejectionNote: { type: String, default: "" },
@@ -33,6 +43,9 @@ const PropertySchema = new mongoose.Schema(
     // ── Ratings (computed from Rating collection) ─────────
     ratingAverage: { type: Number, default: 0 },
     ratingCount: { type: Number, default: 0 },
+
+    // ── Reach (how many customers opened the plot) ────────
+    views: { type: Number, default: 0 },
 
     // ── Media ─────────────────────────────────────────────
     photos: [{ type: String }],

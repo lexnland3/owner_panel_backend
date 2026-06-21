@@ -11,6 +11,11 @@ exports.protect = async (req, res, next) => {
     req.owner = await Owner.findById(decoded.id);
     if (!req.owner)
       return res.status(401).json({ success: false, message: 'Owner not found' });
+    if (req.owner.accountStatus === 'suspended')
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been suspended. Please contact support.',
+      });
 
     next();
   } catch (err) {

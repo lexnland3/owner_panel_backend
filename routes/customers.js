@@ -38,6 +38,7 @@ try {
       city: { type: String, default: "" },
       lookingFor: { type: String, default: "" }, // optional: plot / pg / guest
       profilePhoto: { type: String, default: null }, // optional
+      isSuspended: { type: Boolean, default: false }, // admin can ban
     },
     { timestamps: true },
   );
@@ -67,6 +68,12 @@ const customerAuth = async (req, res, next) => {
       return res
         .status(401)
         .json({ success: false, message: "Customer not found" });
+    if (cust.isSuspended)
+      return res.status(403).json({
+        success: false,
+        message:
+          "Your account has been suspended. Please contact support.",
+      });
     req.customerId = decoded.id;
     req.customer = cust;
     next();
@@ -90,6 +97,11 @@ const ownerAuth = async (req, res, next) => {
       return res
         .status(401)
         .json({ success: false, message: "Owner not found" });
+    if (owner.accountStatus === "suspended")
+      return res.status(403).json({
+        success: false,
+        message: "Your account has been suspended. Please contact support.",
+      });
     req.ownerId = decoded.id;
     req.owner = owner;
     next();
@@ -215,13 +227,9 @@ router.post("/google", async (req, res, next) => {
       return res
         .status(400)
         .json({ success: false, message: "Could not get email from Google" });
-    if (await Owner.findOne({ email }))
-      return res.status(403).json({
-        success: false,
-        isOwner: true,
-        message:
-          "This Google account is registered as a property owner. Please use the Owner Panel app.",
-      });
+    // Unified platform: the same Google account can be BOTH a buyer and a
+    // seller. We no longer block customer sign-in for emails that also have an
+    // Owner record — the two are separate profiles under one login.
     let customer = await Customer.findOne({
       $or: [{ googleId: uid }, { email }],
     });
@@ -294,6 +302,27 @@ router.get("/plots", async (req, res, next) => {
       });
 
     if (and.length) filter.$and = and;
+
+    // If the viewer is a logged-in customer who also has an owner account,
+    // hide their own plots from the browse list (you don't shop your own).
+    const _token = req.headers.authorization?.split(" ")[1];
+    if (_token) {
+      try {
+        const _decoded = jwt.verify(_token, process.env.JWT_SECRET);
+        if (_decoded.role === "customer") {
+          const _cust = await Customer.findById(_decoded.id).select("email");
+          if (_cust && _cust.email) {
+            const OwnerModel = require("../models/Owner");
+            const _myOwner = await OwnerModel.findOne({
+              email: _cust.email,
+            }).select("_id");
+            if (_myOwner) filter.owner = { $ne: _myOwner._id };
+          }
+        }
+      } catch (_) {
+        /* not logged in / bad token → just show everything */
+      }
+    }
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(20, parseInt(req.query.limit) || 10);
     const [properties, total] = await Promise.all([
@@ -328,6 +357,10 @@ router.get("/plots/:id", async (req, res, next) => {
       return res
         .status(404)
         .json({ success: false, message: "Plot not found" });
+    // Count this open as a view (fire-and-forget; never blocks the response)
+    Property.updateOne({ _id: property._id }, { $inc: { views: 1 } }).catch(
+      () => {},
+    );
     res.json({ success: true, property });
   } catch (err) {
     next(err);
@@ -601,6 +634,23 @@ router.post("/chats", customerAuth, async (req, res, next) => {
       return res
         .status(400)
         .json({ success: false, message: "ownerId required" });
+    // Block self-chat: if the logged-in user is also the owner of this plot
+    // (same email across their customer + owner profiles), don't let them
+    // start a conversation with themselves.
+    const OwnerModel = require("../models/Owner");
+    const targetOwner = await OwnerModel.findById(ownerId).select("email");
+    if (
+      targetOwner &&
+      req.customer.email &&
+      String(targetOwner.email).toLowerCase() ===
+        String(req.customer.email).toLowerCase()
+    ) {
+      return res.status(400).json({
+        success: false,
+        isOwnPlot: true,
+        message: "This is your own plot — you can't chat with yourself.",
+      });
+    }
     // One thread per customer-owner pair (not per plot).
     let chat = await Chat.findOne({
       customer: req.customerId,
@@ -630,10 +680,19 @@ router.post("/chats", customerAuth, async (req, res, next) => {
 // All chats for customer
 router.get("/chats", customerAuth, async (req, res, next) => {
   try {
-    const chats = await Chat.find({ customer: req.customerId })
+    let chats = await Chat.find({ customer: req.customerId })
       .populate("property", "propertyName photos location")
-      .populate("owner", "name")
+      .populate("owner", "name email")
       .sort({ lastMessageAt: -1 });
+    // Hide self-chats: a thread whose owner is the user's own owner account.
+    const myEmail = String(req.customer.email || "").toLowerCase();
+    chats = chats
+      .filter((c) => String(c.owner?.email || "").toLowerCase() !== myEmail)
+      .map((c) => {
+        const o = c.toObject();
+        if (o.owner) delete o.owner.email; // don't leak owner email to client
+        return o;
+      });
     res.json({ success: true, chats });
   } catch (err) {
     next(err);
@@ -736,10 +795,15 @@ router.get("/chats/:chatId/poll", customerAuth, async (req, res, next) => {
 // Get all chats for owner
 router.get("/owner-chats", ownerAuth, async (req, res, next) => {
   try {
-    const chats = await Chat.find({ owner: req.ownerId })
+    let chats = await Chat.find({ owner: req.ownerId })
       .populate("property", "propertyName photos")
       .populate("customer", "name email")
       .sort({ lastMessageAt: -1 });
+    // Hide self-chats (thread with your own customer account).
+    const myEmail = String(req.owner.email || "").toLowerCase();
+    chats = chats.filter(
+      (c) => String(c.customer?.email || "").toLowerCase() !== myEmail,
+    );
     res.json({ success: true, chats });
   } catch (err) {
     next(err);

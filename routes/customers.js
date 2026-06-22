@@ -347,20 +347,21 @@ router.get("/plots", async (req, res, next) => {
 
 router.get("/plots/:id", async (req, res, next) => {
   try {
-    const property = await Property.findOne({
-      _id: req.params.id,
-      propertyType: "plot",
-      status: "active",
-      isVerified: true,
-    }).populate("owner", "name accountStatus isAadhaarVerified _id");
+    // Atomically fetch the plot AND count this open as one view (+1).
+    const property = await Property.findOneAndUpdate(
+      {
+        _id: req.params.id,
+        propertyType: "plot",
+        status: "active",
+        isVerified: true,
+      },
+      { $inc: { views: 1 } },
+      { new: true },
+    ).populate("owner", "name accountStatus isAadhaarVerified _id");
     if (!property)
       return res
         .status(404)
         .json({ success: false, message: "Plot not found" });
-    // Count this open as a view (fire-and-forget; never blocks the response)
-    Property.updateOne({ _id: property._id }, { $inc: { views: 1 } }).catch(
-      () => {},
-    );
     res.json({ success: true, property });
   } catch (err) {
     next(err);

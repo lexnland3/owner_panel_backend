@@ -704,6 +704,43 @@ router.patch("/customers/:id/reinstate", async (req, res, next) => {
   }
 });
 
+// ── GET /api/admin/support ────────────────────────────────────
+// All contact / "ask a problem" tickets from customers and owners.
+router.get("/support", async (req, res, next) => {
+  try {
+    const SupportTicket = require("../models/SupportTicket");
+    const filter = {};
+    if (req.query.status === "open" || req.query.status === "resolved") {
+      filter.status = req.query.status;
+    }
+    const tickets = await SupportTicket.find(filter)
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({ success: true, count: tickets.length, tickets });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── PATCH /api/admin/support/:id/resolve ──────────────────────
+router.patch("/support/:id/resolve", async (req, res, next) => {
+  try {
+    const SupportTicket = require("../models/SupportTicket");
+    const ticket = await SupportTicket.findByIdAndUpdate(
+      req.params.id,
+      { status: "resolved" },
+      { new: true },
+    );
+    if (!ticket)
+      return res
+        .status(404)
+        .json({ success: false, message: "Ticket not found" });
+    res.json({ success: true, message: "Ticket resolved", ticket });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
 
 // ── GET /api/admin/notifications ─────────────────────────────

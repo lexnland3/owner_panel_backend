@@ -687,11 +687,35 @@ router.get("/chats", customerAuth, async (req, res, next) => {
       .sort({ lastMessageAt: -1 });
     // Hide self-chats: a thread whose owner is the user's own owner account.
     const myEmail = String(req.customer.email || "").toLowerCase();
+
+    // Build an accurate preview from each chat's most recent message so the
+    // list reflects deletions/edits (not a stale cached value).
+    const ids = chats.map((c) => c._id);
+    const lastMsgs = await Message.aggregate([
+      { $match: { chat: { $in: ids } } },
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: "$chat", m: { $first: "$$ROOT" } } },
+    ]);
+    const lastMap = {};
+    lastMsgs.forEach((x) => {
+      lastMap[String(x._id)] = x.m;
+    });
+    const previewOf = (m) => {
+      if (!m) return "";
+      if (m.deletedForEveryone) return "This message was deleted";
+      if (m.imageUrl) return "📷 Photo";
+      if (m.audioUrl) return "🎤 Voice message";
+      if (m.linkUrl) return "🔗 Link";
+      return (m.text || "").substring(0, 60);
+    };
+
     chats = chats
       .filter((c) => String(c.owner?.email || "").toLowerCase() !== myEmail)
       .map((c) => {
         const o = c.toObject();
         if (o.owner) delete o.owner.email; // don't leak owner email to client
+        const lm = lastMap[String(o._id)];
+        if (lm) o.lastMessage = previewOf(lm);
         return o;
       });
     res.json({ success: true, chats });
@@ -802,9 +826,37 @@ router.get("/owner-chats", ownerAuth, async (req, res, next) => {
       .sort({ lastMessageAt: -1 });
     // Hide self-chats (thread with your own customer account).
     const myEmail = String(req.owner.email || "").toLowerCase();
-    chats = chats.filter(
-      (c) => String(c.customer?.email || "").toLowerCase() !== myEmail,
-    );
+
+    // Accurate preview from each chat's most recent message.
+    const ids = chats.map((c) => c._id);
+    const lastMsgs = await Message.aggregate([
+      { $match: { chat: { $in: ids } } },
+      { $sort: { createdAt: -1 } },
+      { $group: { _id: "$chat", m: { $first: "$$ROOT" } } },
+    ]);
+    const lastMap = {};
+    lastMsgs.forEach((x) => {
+      lastMap[String(x._id)] = x.m;
+    });
+    const previewOf = (m) => {
+      if (!m) return "";
+      if (m.deletedForEveryone) return "This message was deleted";
+      if (m.imageUrl) return "📷 Photo";
+      if (m.audioUrl) return "🎤 Voice message";
+      if (m.linkUrl) return "🔗 Link";
+      return (m.text || "").substring(0, 60);
+    };
+
+    chats = chats
+      .filter(
+        (c) => String(c.customer?.email || "").toLowerCase() !== myEmail,
+      )
+      .map((c) => {
+        const o = c.toObject();
+        const lm = lastMap[String(o._id)];
+        if (lm) o.lastMessage = previewOf(lm);
+        return o;
+      });
     res.json({ success: true, chats });
   } catch (err) {
     next(err);
@@ -1220,6 +1272,25 @@ router.delete(
         msg.deletedForSender = true;
       }
       await msg.save();
+
+      // Refresh the chat's last-message preview so the chat list stops
+      // showing a message that was just deleted for everyone.
+      if (scope === "everyone") {
+        const lastMsg = await Message.findOne({ chat: msg.chat }).sort({
+          createdAt: -1,
+        });
+        let preview = "";
+        if (lastMsg) {
+          if (lastMsg.deletedForEveryone)
+            preview = "This message was deleted";
+          else if (lastMsg.imageUrl) preview = "📷 Photo";
+          else if (lastMsg.audioUrl) preview = "🎤 Voice message";
+          else if (lastMsg.linkUrl) preview = "🔗 Link";
+          else preview = (lastMsg.text || "").substring(0, 60);
+        }
+        await Chat.findByIdAndUpdate(msg.chat, { lastMessage: preview });
+      }
+
       res.json({ success: true, message: msg });
     } catch (err) {
       next(err);
@@ -1272,6 +1343,25 @@ router.delete(
         msg.deletedForSender = true;
       }
       await msg.save();
+
+      // Refresh the chat's last-message preview so the chat list stops
+      // showing a message that was just deleted for everyone.
+      if (scope === "everyone") {
+        const lastMsg = await Message.findOne({ chat: msg.chat }).sort({
+          createdAt: -1,
+        });
+        let preview = "";
+        if (lastMsg) {
+          if (lastMsg.deletedForEveryone)
+            preview = "This message was deleted";
+          else if (lastMsg.imageUrl) preview = "📷 Photo";
+          else if (lastMsg.audioUrl) preview = "🎤 Voice message";
+          else if (lastMsg.linkUrl) preview = "🔗 Link";
+          else preview = (lastMsg.text || "").substring(0, 60);
+        }
+        await Chat.findByIdAndUpdate(msg.chat, { lastMessage: preview });
+      }
+
       res.json({ success: true, message: msg });
     } catch (err) {
       next(err);

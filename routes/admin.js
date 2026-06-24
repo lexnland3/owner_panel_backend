@@ -562,73 +562,8 @@ router.delete("/customers/:id", async (req, res, next) => {
 });
 
 // ── GET /api/admin/chats ──────────────────────────────────────
-router.get("/chats", async (req, res, next) => {
-  try {
-    const Chat = require("../models/Chat");
-    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 20));
-    const total = await Chat.countDocuments();
-    const chats = await Chat.find()
-      .populate("customer", "name email")
-      .populate("owner", "name email")
-      .populate("property", "propertyName location")
-      .sort({ lastMessageAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .lean();
-    res.json({
-      success: true,
-      chats,
-      count: total,
-      page,
-      pages: Math.ceil(total / limit) || 1,
-    });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ── GET /api/admin/chats/:id/messages ─────────────────────────
-router.get("/chats/:id/messages", async (req, res, next) => {
-  try {
-    const Chat = require("../models/Chat");
-    const Message = require("../models/Message");
-    const chat = await Chat.findById(req.params.id)
-      .populate("customer", "name email")
-      .populate("owner", "name email")
-      .populate("property", "propertyName location")
-      .lean();
-    if (!chat) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Chat not found" });
-    }
-    const messages = await Message.find({ chat: chat._id })
-      .sort({ createdAt: 1 })
-      .lean();
-    res.json({ success: true, chat, messages });
-  } catch (err) {
-    next(err);
-  }
-});
-
-// ── DELETE /api/admin/chats/:id ───────────────────────────────
-router.delete("/chats/:id", async (req, res, next) => {
-  try {
-    const Chat = require("../models/Chat");
-    const Message = require("../models/Message");
-    const chat = await Chat.findByIdAndDelete(req.params.id);
-    if (!chat) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Chat not found" });
-    }
-    await Message.deleteMany({ chat: chat._id });
-    res.json({ success: true, message: "Chat deleted" });
-  } catch (err) {
-    next(err);
-  }
-});
+// Removed by design: admin does not have access to private chats
+// between customers and owners.
 
 // ── PATCH /api/admin/owners/:id/suspend ───────────────────────
 router.patch("/owners/:id/suspend", async (req, res, next) => {

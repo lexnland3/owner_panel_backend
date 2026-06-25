@@ -876,6 +876,19 @@ router.get("/owner-chats", ownerAuth, async (req, res, next) => {
   }
 });
 
+// Owner unread chat count (number of conversations with new messages)
+router.get("/owner-chats/unread-count", ownerAuth, async (req, res, next) => {
+  try {
+    const count = await Chat.countDocuments({
+      owner: req.ownerId,
+      unreadByOwner: { $gt: 0 },
+    });
+    res.json({ success: true, count });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Get messages for owner
 router.get(
   "/owner-chats/:chatId/messages",

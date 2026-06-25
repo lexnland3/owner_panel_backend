@@ -724,6 +724,19 @@ router.get("/chats", customerAuth, async (req, res, next) => {
   }
 });
 
+// Unread chat count (number of conversations with new messages)
+router.get("/chats/unread-count", customerAuth, async (req, res, next) => {
+  try {
+    const count = await Chat.countDocuments({
+      customer: req.customerId,
+      unreadByCustomer: { $gt: 0 },
+    });
+    res.json({ success: true, count });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Get messages
 router.get("/chats/:chatId/messages", customerAuth, async (req, res, next) => {
   try {

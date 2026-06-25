@@ -4,6 +4,7 @@ const {
   register,
   login,
   googleAuth,
+  profileStatus,
   verifyEmailOTP,
   resendOTP,
   forgotPassword,
@@ -26,6 +27,7 @@ const { protect } = require("../middleware/auth");
 router.post("/register", register);
 router.post("/login", login);
 router.post("/google", googleAuth);
+router.post("/profile-status", profileStatus);
 router.post("/verify-email-otp", verifyEmailOTP);
 router.post("/resend-otp", resendOTP);
 router.post("/forgot-password", forgotPassword);

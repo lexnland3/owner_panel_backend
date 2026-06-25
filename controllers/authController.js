@@ -93,6 +93,61 @@ exports.googleAuth = async (req, res, next) => {
 };
 
 // ────────────────────────────────────────────────────────────
+// POST /api/auth/profile-status
+// Verifies the Firebase token and reports which profiles already exist
+// for this Google account — WITHOUT creating either. Used to decide where
+// to route the user after login (customer panel / owner panel / ask).
+// ────────────────────────────────────────────────────────────
+exports.profileStatus = async (req, res, next) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken)
+      return res
+        .status(400)
+        .json({ success: false, message: "idToken is required" });
+
+    const result = await verifyFirebaseToken(idToken);
+    if (!result.valid)
+      return res.status(401).json({
+        success: false,
+        message: `Invalid Firebase token: ${result.error}`,
+      });
+
+    const { uid, email } = result.decoded;
+    if (!email)
+      return res.status(400).json({
+        success: false,
+        message: "Could not get email from Google account",
+      });
+
+    const mongoose = require("mongoose");
+    let Customer = null;
+    try {
+      Customer = mongoose.model("Customer");
+    } catch (_) {
+      Customer = null;
+    }
+
+    const owner = await Owner.findOne({
+      $or: [{ googleId: uid }, { email }],
+    }).select("_id");
+    const customer = Customer
+      ? await Customer.findOne({
+          $or: [{ googleId: uid }, { email }],
+        }).select("_id")
+      : null;
+
+    res.json({
+      success: true,
+      hasOwner: !!owner,
+      hasCustomer: !!customer,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ────────────────────────────────────────────────────────────
 // POST /api/auth/register
 // ────────────────────────────────────────────────────────────
 exports.register = async (req, res, next) => {
@@ -503,26 +558,6 @@ exports.saveOwnerDetails = async (req, res, next) => {
   }
 };
 
-// Razorpay's Payment Link API rejects the whole request with a vague 400
-// if `customer.contact` isn't a sane phone number (e.g. empty string, no
-// country code, letters, etc). Normalize to E.164-ish (+91XXXXXXXXXX) when
-// we can, otherwise omit the field entirely rather than send garbage.
-function sanitizePhone(raw) {
-  if (!raw) return undefined;
-  const digits = String(raw).replace(/[^\d]/g, "");
-  if (digits.length === 10) return `+91${digits}`;
-  if (digits.length === 12 && digits.startsWith("91")) return `+${digits}`;
-  if (digits.length >= 8 && digits.length <= 15) return `+${digits}`;
-  return undefined; // too short/long/garbled — leave it out
-}
-
-// Basic sanity check so we don't send obviously-malformed emails either.
-function sanitizeEmail(raw) {
-  if (!raw) return undefined;
-  const email = String(raw).trim();
-  return /^\S+@\S+\.\S+$/.test(email) ? email : undefined;
-}
-
 // POST /api/auth/payment/create-order — create a Razorpay order for the fee
 // POST /api/auth/payment/create-link — create a Razorpay Payment Link
 exports.createPaymentLink = async (req, res, next) => {
@@ -534,39 +569,20 @@ exports.createPaymentLink = async (req, res, next) => {
       });
 
     const o = req.owner;
-    const safeContact = sanitizePhone(o.phone);
-    const safeEmail = sanitizeEmail(o.email);
-
-    let link;
-    try {
-      link = await razorpay.paymentLink.create({
-        amount: REGISTRATION_FEE_PAISE,
-        currency: "INR",
-        accept_partial: false,
-        description: "LexNLand Owner Registration Fee",
-        customer: {
-          name: (o.name || "").trim() || "LexNLand Owner",
-          ...(safeEmail ? { email: safeEmail } : {}),
-          ...(safeContact ? { contact: safeContact } : {}),
-        },
-        notify: { email: !!safeEmail, sms: false },
-        reminder_enable: false,
-        notes: { ownerId: o._id.toString(), purpose: "owner_registration" },
-      });
-    } catch (rzpErr) {
-      // Razorpay SDK errors often nest the real message under .error
-      const rzpMessage =
-        rzpErr?.error?.description || rzpErr?.message || String(rzpErr);
-      console.error("❌ Razorpay payment-link error:", rzpMessage);
-      const status = rzpErr.statusCode === 401 ? 401 : 500;
-      return res.status(status).json({
-        success: false,
-        message:
-          status === 401
-            ? "Razorpay authentication failed. Check your keys."
-            : `Could not create payment link: ${rzpMessage}`,
-      });
-    }
+    const link = await razorpay.paymentLink.create({
+      amount: REGISTRATION_FEE_PAISE,
+      currency: "INR",
+      accept_partial: false,
+      description: "LexNLand Owner Registration Fee",
+      customer: {
+        name: o.name || "",
+        email: o.email || "",
+        contact: o.phone || "",
+      },
+      notify: { email: !!o.email, sms: false },
+      reminder_enable: false,
+      notes: { ownerId: o._id.toString(), purpose: "owner_registration" },
+    });
 
     o.paymentOrderId = link.id; // store the payment-link id for status checks
     await o.save({ validateBeforeSave: false });
